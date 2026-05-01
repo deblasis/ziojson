@@ -215,3 +215,25 @@ test "isValid unbalanced" {
     try std.testing.expect(!isValid("[[["));
     try std.testing.expect(!isValid("}"));
 }
+
+
+test "tokenize empty object" {
+    const input = "{}";
+    var tokens: [10]Token = undefined;
+    const count = try tokenize(input, &tokens);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(TokenType.object_open, tokens[0].type);
+    try std.testing.expectEqual(TokenType.object_close, tokens[1].type);
+}
+
+test "tokenize whitespace handling" {
+    const input = "  {  \"key\"  :  \"value\"  }  ";
+    var tokens: [10]Token = undefined;
+    const count = try tokenize(input, &tokens);
+    try std.testing.expectEqual(@as(usize, 5), count);
+}
+
+test "findKey nested" {
+    const json = "{\"outer\": \"hello\"}";
+    try std.testing.expectEqualStrings("hello", findKey(json, "outer").?);
+}
