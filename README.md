@@ -2,9 +2,29 @@
 
 JSON tokenizer and lookup for Zig. Zero-alloc tokenization, key extraction, structural validation.
 
+## The pitch
+
 Tokenize JSON strings into typed tokens. Look up keys in JSON objects (shallow). Validate JSON structure.
 
-## Quick start
+```zig
+const ziojson = @import("ziojson");
+
+// Tokenize JSON
+var tokens: [64]ziojson.Token = undefined;
+const count = try ziojson.tokenize("{\"name\": \"Alice\", \"age\": 30}", &tokens);
+// tokens[0] = .object_open, tokens[1] = .string("name"), ...
+
+// Shallow key lookup
+const name = ziojson.findKey(json, "name").?; // "Alice"
+const age = ziojson.findKey(json, "age").?;   // "30"
+
+// Validate structure (bracket matching)
+if (ziojson.isValid(json)) { /* balanced brackets */ }
+
+// Token types: object_open/close, array_open/close, string, number, boolean, null, colon, comma
+```
+
+## Install
 
 ```bash
 zig fetch --save git+https://github.com/deblasis/ziojson
@@ -22,36 +42,12 @@ exe.root_module.addImport("ziojson", dep.module("ziojson"));
 
 Requires Zig 0.16.
 
-## Example output
-
-`zig build run-example` produces:
-
-```
-=== ziojson example ===
-
-Tokenizing: {"name": "Alice", "age": 30, "active": true}
-  object_open: "{"
-  string: "\"name\""
-  colon: ":"
-  string: "\"Alice\""
-  ...
-  object_close: "}"
-
-Key lookup:
-  name = Alice
-  age = 30
-  active = true
-```
-
-See [examples/example.zig](examples/example.zig) for the source.
-
 ## API
 
-- `tokenize(input, tokens)` — tokenize JSON into typed tokens
+- `tokenize(input, tokens)` — tokenize JSON
 - `Token{ .type, .text }` — typed token
-- `TokenType` — object_open/close, array_open/close, string, number, boolean, null, colon, comma
 - `findKey(json, key)` — shallow key lookup
-- `isValid(json)` — structural bracket matching
+- `isValid(json)` — bracket matching
 
 ## Compatibility
 
