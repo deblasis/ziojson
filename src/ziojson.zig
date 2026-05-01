@@ -237,3 +237,29 @@ test "findKey nested" {
     const json = "{\"outer\": \"hello\"}";
     try std.testing.expectEqualStrings("hello", findKey(json, "outer").?);
 }
+
+test "findKey missing" {
+    const json = "{\"name\": \"Alice\"}";
+    try std.testing.expect(findKey(json, "age") == null);
+}
+
+test "isValid balanced" {
+    try std.testing.expect(isValid("{\"a\": 1}"));
+    try std.testing.expect(isValid("[1, 2, 3]"));
+    try std.testing.expect(!isValid("{\"a\": 1"));
+    try std.testing.expect(!isValid("[1, 2"));
+}
+
+test "tokenize empty input" {
+    var tokens: [10]Token = undefined;
+    const count = try tokenize("", &tokens);
+    try std.testing.expectEqual(@as(usize, 0), count);
+}
+
+test "tokenize boolean and null" {
+    var tokens: [10]Token = undefined;
+    const count = try tokenize("true false null", &tokens);
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expectEqual(TokenType.boolean, tokens[0].type);
+    try std.testing.expectEqual(TokenType.null, tokens[2].type);
+}
