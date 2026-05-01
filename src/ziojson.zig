@@ -263,3 +263,17 @@ test "tokenize boolean and null" {
     try std.testing.expectEqual(TokenType.boolean, tokens[0].type);
     try std.testing.expectEqual(TokenType.null, tokens[2].type);
 }
+
+test "tokenize nested object" {
+    var tokens: [20]Token = undefined;
+    const count = try tokenize("{\"a\": {\"b\": 1}}", &tokens);
+    try std.testing.expect(count >= 4);
+}
+
+test "findKey empty object" {
+    try std.testing.expect(findKey("{}", "any") == null);
+}
+
+test "isValid empty string" {
+    try std.testing.expect(isValid(""));
+}
