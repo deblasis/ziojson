@@ -2,7 +2,9 @@
 
 ## Overview
 
-JSON toolkit for Zig. Extends std.json with jq-style path queries, streaming parser, schema validation, and pretty printing.
+Small JSON text helpers for Zig. Three public functions and no allocator:
+`tokenize`, `findKey`, `isValid`. It does not parse JSON into a tree and it
+does not extend std.json.
 
 ## Project Structure
 
@@ -19,7 +21,7 @@ build.zig        - Build configuration
 ```bash
 zig build test          # Run tests
 zig build run-example   # Run the example
-zig build               - Build the library
+zig build               # Build the library
 ```
 
 ## Architecture

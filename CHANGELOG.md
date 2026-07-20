@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial release
-- jq-style path queries
-- streaming parser
-- schema validation
-- pretty printing
+- `tokenize` splits JSON text into typed tokens using a caller supplied buffer
+- `findKey` looks up a value by key with a first match substring search
+- `isValid` checks that brackets and braces balance

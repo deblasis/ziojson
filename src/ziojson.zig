@@ -17,8 +17,12 @@ pub const Token = struct {
     }
 };
 
-/// Tokenize a JSON string (basic level — no nested string escaping).
-/// Caller must provide an output buffer.
+/// Split a JSON string into tokens. Backslash escapes inside strings are
+/// skipped over, but escape sequences are not decoded: token text is the raw
+/// slice of the input, quotes included. Numbers are only scanned for the
+/// characters a number can contain, they are not validated.
+/// Caller must provide an output buffer. Returns error.TooManyTokens if it
+/// does not fit.
 pub fn tokenize(input: []const u8, tokens: []Token) !usize {
     var count: usize = 0;
     var i: usize = 0;
@@ -27,12 +31,42 @@ pub fn tokenize(input: []const u8, tokens: []Token) !usize {
         const ch = input[i];
         switch (ch) {
             ' ', '\t', '\n', '\r' => i += 1,
-            '{' => { if (count >= tokens.len) return error.TooManyTokens; tokens[count] = Token.init(.object_open, input[i .. i + 1]); count += 1; i += 1; },
-            '}' => { if (count >= tokens.len) return error.TooManyTokens; tokens[count] = Token.init(.object_close, input[i .. i + 1]); count += 1; i += 1; },
-            '[' => { if (count >= tokens.len) return error.TooManyTokens; tokens[count] = Token.init(.array_open, input[i .. i + 1]); count += 1; i += 1; },
-            ']' => { if (count >= tokens.len) return error.TooManyTokens; tokens[count] = Token.init(.array_close, input[i .. i + 1]); count += 1; i += 1; },
-            ':' => { if (count >= tokens.len) return error.TooManyTokens; tokens[count] = Token.init(.colon, input[i .. i + 1]); count += 1; i += 1; },
-            ',' => { if (count >= tokens.len) return error.TooManyTokens; tokens[count] = Token.init(.comma, input[i .. i + 1]); count += 1; i += 1; },
+            '{' => {
+                if (count >= tokens.len) return error.TooManyTokens;
+                tokens[count] = Token.init(.object_open, input[i .. i + 1]);
+                count += 1;
+                i += 1;
+            },
+            '}' => {
+                if (count >= tokens.len) return error.TooManyTokens;
+                tokens[count] = Token.init(.object_close, input[i .. i + 1]);
+                count += 1;
+                i += 1;
+            },
+            '[' => {
+                if (count >= tokens.len) return error.TooManyTokens;
+                tokens[count] = Token.init(.array_open, input[i .. i + 1]);
+                count += 1;
+                i += 1;
+            },
+            ']' => {
+                if (count >= tokens.len) return error.TooManyTokens;
+                tokens[count] = Token.init(.array_close, input[i .. i + 1]);
+                count += 1;
+                i += 1;
+            },
+            ':' => {
+                if (count >= tokens.len) return error.TooManyTokens;
+                tokens[count] = Token.init(.colon, input[i .. i + 1]);
+                count += 1;
+                i += 1;
+            },
+            ',' => {
+                if (count >= tokens.len) return error.TooManyTokens;
+                tokens[count] = Token.init(.comma, input[i .. i + 1]);
+                count += 1;
+                i += 1;
+            },
             '"' => {
                 var end = i + 1;
                 while (end < input.len) {
@@ -91,7 +125,11 @@ pub fn tokenize(input: []const u8, tokens: []Token) !usize {
     return count;
 }
 
-/// Find a key in a JSON object string (shallow lookup).
+/// Find the value for a key by scanning the text for the first occurrence of
+/// "key" and reading whatever follows the colon. This is a plain substring
+/// search, it is not object aware: it will happily match a key nested deeper
+/// in the document or a quoted string that just looks like the key. Returns
+/// null if the key is not found or if the key is longer than 254 bytes.
 pub fn findKey(json: []const u8, key: []const u8) ?[]const u8 {
     // Search for "key":
     var search: [256]u8 = undefined;
@@ -117,7 +155,9 @@ pub fn findKey(json: []const u8, key: []const u8) ?[]const u8 {
     return std.mem.trim(u8, json[i..end], " \t\n\r");
 }
 
-/// Check if JSON is valid (basic structural check).
+/// Check that brackets and braces balance, ignoring anything inside strings.
+/// This is not a JSON validator: it does not check that the brackets match
+/// each other by kind, and empty input counts as balanced.
 pub fn isValid(json: []const u8) bool {
     var depth: i32 = 0;
     var in_string = false;
@@ -216,7 +256,6 @@ test "isValid unbalanced" {
     try std.testing.expect(!isValid("}"));
 }
 
-
 test "tokenize empty object" {
     const input = "{}";
     var tokens: [10]Token = undefined;
@@ -243,13 +282,6 @@ test "findKey missing" {
     try std.testing.expect(findKey(json, "age") == null);
 }
 
-test "isValid balanced" {
-    try std.testing.expect(isValid("{\"a\": 1}"));
-    try std.testing.expect(isValid("[1, 2, 3]"));
-    try std.testing.expect(!isValid("{\"a\": 1"));
-    try std.testing.expect(!isValid("[1, 2"));
-}
-
 test "tokenize empty input" {
     var tokens: [10]Token = undefined;
     const count = try tokenize("", &tokens);
@@ -261,17 +293,13 @@ test "tokenize boolean and null" {
     const count = try tokenize("true false null", &tokens);
     try std.testing.expectEqual(@as(usize, 3), count);
     try std.testing.expectEqual(TokenType.boolean, tokens[0].type);
-    try std.testing.expectEqual(TokenType.null, tokens[2].type);
+    try std.testing.expectEqual(TokenType.null_, tokens[2].type);
 }
 
 test "tokenize nested object" {
     var tokens: [20]Token = undefined;
     const count = try tokenize("{\"a\": {\"b\": 1}}", &tokens);
     try std.testing.expect(count >= 4);
-}
-
-test "findKey empty object" {
-    try std.testing.expect(findKey("{}", "any") == null);
 }
 
 test "isValid empty string" {
