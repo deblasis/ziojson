@@ -26,6 +26,42 @@ if (ziojson.isValid(json)) { /* brackets balance */ }
 // Token types: object_open/close, array_open/close, string, number, boolean, null_, colon, comma
 ```
 
+## Writing JSON
+
+A small stateful emitter builds compact JSON and handles commas, colons, quotes,
+and escaping for you, so you cannot emit malformed output. It writes to a
+`*std.Io.Writer`.
+
+```zig
+const std = @import("std");
+const ziojson = @import("ziojson");
+
+var buf: [128]u8 = undefined;
+var out = std.Io.Writer.fixed(&buf);
+
+var jw = ziojson.Writer.init(&out);
+try jw.beginObject();
+try jw.field("name");
+try jw.writeString("Alice \"the ace\"");
+try jw.field("age");
+try jw.writeInt(30);
+try jw.field("tags");
+try jw.beginArray();
+try jw.writeString("a");
+try jw.writeString("b");
+try jw.endArray();
+try jw.endObject();
+
+// buf[0..out.end] == {"name":"Alice \"the ace\"","age":30,"tags":["a","b"]}
+```
+
+Just need escaping? `ziojson.writeStringEscaped(w, s)` writes a complete quoted,
+escaped JSON string, and `ziojson.escapeInto(w, s)` writes only the escaped
+contents (no quotes). Both escape `"` and `\`, use the short escapes
+`\n \r \t \b \f`, emit any other control byte as `\uXXXX`, and pass multibyte
+UTF-8 through untouched. Non-finite floats are written as `null` (JSON has no
+NaN or infinity).
+
 ## Install
 
 ```bash
@@ -50,6 +86,8 @@ Requires Zig 0.16.
 - `Token{ .type, .text }` - token type plus the raw slice of the input it came from
 - `findKey(json, key)` - first match substring lookup of `"key":` and the value after it
 - `isValid(json)` - brackets and braces balance, ignoring string contents
+- `Writer.init(out)` - stateful compact-JSON emitter over a `*std.Io.Writer`; `beginObject`/`endObject`, `beginArray`/`endArray`, `field`, and `writeString`/`writeInt`/`writeFloat`/`writeBool`/`writeNull`
+- `writeStringEscaped(w, s)` / `escapeInto(w, s)` - escape a string into a writer, with or without the surrounding quotes
 
 ## What it does not do
 

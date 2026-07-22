@@ -11,4 +11,16 @@ pub fn main() !void {
     std.debug.print("name: {s}\n", .{ziojson.findKey(json, "name").?});
     std.debug.print("age: {s}\n", .{ziojson.findKey(json, "age").?});
     std.debug.print("brackets balance: {}\n", .{ziojson.isValid(json)});
+
+    // Build JSON with the writer.
+    var buf: [128]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buf);
+    var jw = ziojson.Writer.init(&out);
+    try jw.beginObject();
+    try jw.field("name");
+    try jw.writeString("Alice");
+    try jw.field("age");
+    try jw.writeInt(30);
+    try jw.endObject();
+    std.debug.print("built: {s}\n", .{buf[0..out.end]});
 }
