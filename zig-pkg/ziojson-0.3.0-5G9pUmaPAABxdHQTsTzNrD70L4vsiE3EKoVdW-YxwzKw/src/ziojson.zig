@@ -125,21 +125,10 @@ pub fn tokenize(input: []const u8, tokens: []Token) !usize {
     return count;
 }
 
-/// The kind of a JSON value found by `findValue`.
-pub const ValueKind = enum { string, number, boolean, null_, object, array };
-
-/// A JSON value located by `findValue`: its kind plus its raw text. For a
-/// string, `text` is the contents without surrounding quotes; for an object or
-/// array, the balanced bracketed span; for a scalar, the literal token.
-pub const FoundValue = struct {
-    kind: ValueKind,
-    text: []const u8,
-};
-
-/// Find the value for `key` in a JSON document and return its kind and text:
-/// for a string value, the contents without the surrounding quotes; for a
-/// number, boolean or null, the literal token; for an object or array value, the
-/// raw balanced bracketed text.
+/// Find the value for `key` in a JSON document and return it as a slice: for a
+/// string value, the contents without the surrounding quotes; for a number,
+/// boolean or null, the literal token; for an object or array value, the raw
+/// balanced bracketed text. Trailing whitespace is trimmed from scalar values.
 ///
 /// This is a STRUCTURAL scan, not a substring search. A quoted token is treated
 /// as a key only when it occupies object-key position (immediately after `{` or
@@ -148,7 +137,7 @@ pub const FoundValue = struct {
 /// of some object on the path. Escaped quotes inside strings are honored.
 /// Returns null if the key is absent, the document nests deeper than 128
 /// levels, or no value follows the key.
-pub fn findValue(json: []const u8, key: []const u8) ?FoundValue {
+pub fn findKey(json: []const u8, key: []const u8) ?[]const u8 {
     var i: usize = 0;
     // Per open container frame; index by depth. kind true = object, false = array.
     var kind: [128]bool = undefined;
@@ -226,19 +215,10 @@ pub fn findValue(json: []const u8, key: []const u8) ?FoundValue {
     return null;
 }
 
-/// Find the value for `key` and return its text (string contents without
-/// quotes, a balanced object/array span, or a scalar token). A thin wrapper
-/// over `findValue` for callers that do not need the value kind. Returns null
-/// if the key is absent or no value follows it.
-pub fn findKey(json: []const u8, key: []const u8) ?[]const u8 {
-    if (findValue(json, key)) |v| return v.text;
-    return null;
-}
-
 /// Read one JSON value starting at `j` (already past leading whitespace) and
-/// return its kind and text: string contents (no quotes), a balanced
-/// object/array span, or a scalar token. Returns null at end of input.
-fn readValue(json: []const u8, j: usize) ?FoundValue {
+/// return its text: string contents (no quotes), a balanced object/array span,
+/// or a scalar token. Returns null at end of input.
+fn readValue(json: []const u8, j: usize) ?[]const u8 {
     if (j >= json.len) return null;
     switch (json[j]) {
         '"' => {
@@ -251,18 +231,12 @@ fn readValue(json: []const u8, j: usize) ?FoundValue {
                 }
             }
             const inner_end = @min(end, json.len);
-            return .{ .kind = .string, .text = json[j + 1 .. inner_end] };
+            return json[j + 1 .. inner_end];
         },
-        '[' => return .{ .kind = .array, .text = json[j..scanContainerEnd(json, j, '[', ']')] },
-        '{' => return .{ .kind = .object, .text = json[j..scanContainerEnd(json, j, '{', '}')] },
-        't', 'f' => {
-            const lit_len: usize = if (json[j] == 'f') 5 else 4;
-            if (j + lit_len > json.len) return null;
-            return .{ .kind = .boolean, .text = json[j .. j + lit_len] };
-        },
-        'n' => {
-            if (j + 4 > json.len) return null;
-            return .{ .kind = .null_, .text = json[j .. j + 4] };
+        '[', '{' => {
+            const open = json[j];
+            const close: u8 = if (open == '[') ']' else '}';
+            return json[j..scanContainerEnd(json, j, open, close)];
         },
         else => {
             var end = j;
@@ -271,7 +245,7 @@ fn readValue(json: []const u8, j: usize) ?FoundValue {
                 json[end] != '\n' and json[end] != '\r') end += 1;
             const slice = json[j..end];
             if (slice.len == 0) return null;
-            return .{ .kind = .number, .text = slice };
+            return slice;
         },
     }
 }
@@ -666,16 +640,6 @@ test "findKey returns a bool, null, number and object value" {
     try std.testing.expectEqualStrings("null", findKey(json, "nothing").?);
     try std.testing.expectEqualStrings("-1.5", findKey(json, "n").?);
     try std.testing.expectEqualStrings("{\"x\": 1}", findKey(json, "obj").?);
-}
-
-test "findValue reports the value kind" {
-    const json = "{\"s\": \"x\", \"n\": 3, \"b\": true, \"z\": null, \"a\": [1], \"o\": {}}";
-    try std.testing.expectEqual(ValueKind.string, findValue(json, "s").?.kind);
-    try std.testing.expectEqual(ValueKind.number, findValue(json, "n").?.kind);
-    try std.testing.expectEqual(ValueKind.boolean, findValue(json, "b").?.kind);
-    try std.testing.expectEqual(ValueKind.null_, findValue(json, "z").?.kind);
-    try std.testing.expectEqual(ValueKind.array, findValue(json, "a").?.kind);
-    try std.testing.expectEqual(ValueKind.object, findValue(json, "o").?.kind);
 }
 
 test "isValid balanced" {
