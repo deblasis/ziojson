@@ -125,34 +125,180 @@ pub fn tokenize(input: []const u8, tokens: []Token) !usize {
     return count;
 }
 
-/// Find the value for a key by scanning the text for the first occurrence of
-/// "key" and reading whatever follows the colon. This is a plain substring
-/// search, it is not object aware: it will happily match a key nested deeper
-/// in the document or a quoted string that just looks like the key. Returns
-/// null if the key is not found or if the key is longer than 254 bytes.
+/// Find the value for `key` in a JSON document and return it as a slice: for a
+/// string value, the contents without the surrounding quotes; for a number,
+/// boolean or null, the literal token; for an object or array value, the raw
+/// balanced bracketed text. Trailing whitespace is trimmed from scalar values.
+///
+/// This is a STRUCTURAL scan, not a substring search. A quoted token is treated
+/// as a key only when it occupies object-key position (immediately after `{` or
+/// `,`), so a string VALUE whose text equals the key name is never mistaken for
+/// the key, and a nested occurrence is returned only if it is genuinely a field
+/// of some object on the path. Escaped quotes inside strings are honored.
+/// Returns null if the key is absent, the document nests deeper than 128
+/// levels, or no value follows the key.
 pub fn findKey(json: []const u8, key: []const u8) ?[]const u8 {
-    // Search for "key":
-    var search: [256]u8 = undefined;
-    const pattern = std.fmt.bufPrint(&search, "\"{s}\"", .{key}) catch return null;
+    var i: usize = 0;
+    // Per open container frame; index by depth. kind true = object, false = array.
+    var kind: [128]bool = undefined;
+    var await_key: [128]bool = undefined; // objects only: the next string is a key
+    var depth: usize = 0;
 
-    const pos = std.mem.indexOf(u8, json, pattern) orelse return null;
-    const after_key = pos + pattern.len;
-    // Skip whitespace and colon
-    var i = after_key;
-    while (i < json.len and (json[i] == ' ' or json[i] == '\t' or json[i] == '\n' or json[i] == '\r' or json[i] == ':')) : (i += 1) {}
-
-    if (i >= json.len) return null;
-
-    if (json[i] == '"') {
-        // String value
-        var end = i + 1;
-        while (end < json.len and json[end] != '"') : (end += 1) {}
-        return json[i + 1 .. end];
+    while (i < json.len) {
+        switch (json[i]) {
+            ' ', '\t', '\n', '\r' => i += 1,
+            '{' => {
+                if (depth < kind.len) {
+                    kind[depth] = true;
+                    await_key[depth] = true;
+                }
+                depth += 1;
+                i += 1;
+            },
+            '[' => {
+                if (depth < kind.len) {
+                    kind[depth] = false;
+                    await_key[depth] = false;
+                }
+                depth += 1;
+                i += 1;
+            },
+            '}' => {
+                if (depth > 0) depth -= 1;
+                i += 1;
+                if (depth > 0 and kind[depth - 1]) await_key[depth - 1] = true;
+            },
+            ']' => {
+                if (depth > 0) depth -= 1;
+                i += 1;
+                if (depth > 0 and kind[depth - 1]) await_key[depth - 1] = true;
+            },
+            ',' => {
+                if (depth > 0 and kind[depth - 1]) await_key[depth - 1] = true;
+                i += 1;
+            },
+            ':' => i += 1,
+            '"' => {
+                const inner_start = i + 1;
+                var end = i + 1;
+                while (end < json.len) : (end += 1) {
+                    if (json[end] == '\\' and end + 1 < json.len) {
+                        end += 1; // skip the escaped char
+                    } else if (json[end] == '"') {
+                        break;
+                    }
+                }
+                const inner_end = @min(end, json.len);
+                const after = if (end < json.len) end + 1 else json.len;
+                const in_obj = depth > 0 and kind[depth - 1];
+                if (in_obj and await_key[depth - 1]) {
+                    if (std.mem.eql(u8, json[inner_start..inner_end], key)) {
+                        var j = after;
+                        while (j < json.len and (json[j] == ' ' or json[j] == '\t' or
+                            json[j] == '\n' or json[j] == '\r' or json[j] == ':')) j += 1;
+                        return readValue(json, j);
+                    }
+                    await_key[depth - 1] = false;
+                } else if (in_obj) {
+                    // A string value: the parent object now awaits its next key.
+                    await_key[depth - 1] = true;
+                }
+                i = after;
+            },
+            else => {
+                // A scalar literal (number / true / false / null) or a stray byte.
+                i = skipScalar(json, i);
+                if (depth > 0 and kind[depth - 1]) await_key[depth - 1] = true;
+            },
+        }
     }
-    // Non-string value
-    var end = i;
-    while (end < json.len and json[end] != ',' and json[end] != '}' and json[end] != ']') : (end += 1) {}
-    return std.mem.trim(u8, json[i..end], " \t\n\r");
+    return null;
+}
+
+/// Read one JSON value starting at `j` (already past leading whitespace) and
+/// return its text: string contents (no quotes), a balanced object/array span,
+/// or a scalar token. Returns null at end of input.
+fn readValue(json: []const u8, j: usize) ?[]const u8 {
+    if (j >= json.len) return null;
+    switch (json[j]) {
+        '"' => {
+            var end = j + 1;
+            while (end < json.len) : (end += 1) {
+                if (json[end] == '\\' and end + 1 < json.len) {
+                    end += 1;
+                } else if (json[end] == '"') {
+                    break;
+                }
+            }
+            const inner_end = @min(end, json.len);
+            return json[j + 1 .. inner_end];
+        },
+        '[', '{' => {
+            const open = json[j];
+            const close: u8 = if (open == '[') ']' else '}';
+            return json[j..scanContainerEnd(json, j, open, close)];
+        },
+        else => {
+            var end = j;
+            while (end < json.len and json[end] != ',' and json[end] != '}' and
+                json[end] != ']' and json[end] != ' ' and json[end] != '\t' and
+                json[end] != '\n' and json[end] != '\r') end += 1;
+            const slice = json[j..end];
+            if (slice.len == 0) return null;
+            return slice;
+        },
+    }
+}
+
+/// Advance past a scalar literal (number, true, false, null) beginning at
+/// `start`. For true/false/null it consumes the fixed keyword length; for
+/// numbers it consumes digits, sign, exponent and decimal markers.
+fn skipScalar(json: []const u8, start: usize) usize {
+    var i = start;
+    if (i >= json.len) return i;
+    const ch = json[i];
+    if (ch == 't' or ch == 'f' or ch == 'n') {
+        const lit_len: usize = if (ch == 'f') 5 else 4;
+        return @min(i + lit_len, json.len);
+    }
+    while (i < json.len) {
+        switch (json[i]) {
+            '0'...'9', '.', 'e', 'E', '+', '-' => i += 1,
+            else => break,
+        }
+    }
+    return i;
+}
+
+/// Find the index just past the container that opens at `start`, honoring
+/// nested containers of the same kind and ignoring brackets inside strings.
+fn scanContainerEnd(json: []const u8, start: usize, open: u8, close: u8) usize {
+    var i = start;
+    var in_string = false;
+    var escape = false;
+    var d: usize = 0;
+    while (i < json.len) : (i += 1) {
+        const ch = json[i];
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (ch == '\\') {
+                escape = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (ch == '"') {
+            in_string = true;
+        } else if (ch == open) {
+            d += 1;
+        } else if (ch == close) {
+            if (d > 0) d -= 1;
+            if (d == 0) return i + 1;
+        }
+    }
+    return json.len;
 }
 
 /// Check that brackets and braces balance, ignoring anything inside strings.
@@ -456,6 +602,44 @@ test "findKey string value" {
 test "findKey missing key" {
     const json = "{}";
     try std.testing.expect(findKey(json, "anything") == null);
+}
+
+test "findKey is not fooled by a string value equal to the key name" {
+    // A string value whose text equals the key must NOT match as the key.
+    const json = "{\"model\": \"gpt\", \"a\": \"model\"}";
+    try std.testing.expectEqualStrings("gpt", findKey(json, "model").?);
+}
+
+test "findKey skips an earlier string value that equals the key" {
+    const json = "{\"note\": \"the model field\", \"model\": \"llama\"}";
+    try std.testing.expectEqualStrings("llama", findKey(json, "model").?);
+}
+
+test "findKey honors escaped quotes inside a sibling string value" {
+    const json = "{\"q\": \"a \\\"model\\\" inside\", \"model\": \"real\"}";
+    try std.testing.expectEqualStrings("real", findKey(json, "model").?);
+}
+
+test "findKey tolerates whitespace and key order" {
+    const json = "{  \"age\" : 30 ,\n\t\"name\":\"Bob\" }";
+    try std.testing.expectEqualStrings("Bob", findKey(json, "name").?);
+    try std.testing.expectEqualStrings("30", findKey(json, "age").?);
+}
+
+test "findKey finds a nested field, not a same-named value in an array" {
+    // The first genuine `id` KEY is in {"id": 1}; the "id" that is the VALUE
+    // of "tag" must never match. Returns the key's value, not "99".
+    const json = "{\"items\": [{\"id\": 1}, {\"id\": 2, \"tag\": \"id\"}], \"id\": 99}";
+    try std.testing.expectEqualStrings("1", findKey(json, "id").?);
+}
+
+test "findKey returns a bool, null, number and object value" {
+    const json = "{\"on\": true, \"off\": false, \"nothing\": null, \"n\": -1.5, \"obj\": {\"x\": 1}}";
+    try std.testing.expectEqualStrings("true", findKey(json, "on").?);
+    try std.testing.expectEqualStrings("false", findKey(json, "off").?);
+    try std.testing.expectEqualStrings("null", findKey(json, "nothing").?);
+    try std.testing.expectEqualStrings("-1.5", findKey(json, "n").?);
+    try std.testing.expectEqualStrings("{\"x\": 1}", findKey(json, "obj").?);
 }
 
 test "isValid balanced" {
