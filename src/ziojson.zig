@@ -177,15 +177,15 @@ pub fn findValue(json: []const u8, key: []const u8) ?FoundValue {
             '}' => {
                 if (depth > 0) depth -= 1;
                 i += 1;
-                if (depth > 0 and kind[depth - 1]) await_key[depth - 1] = true;
+                if (depth > 0 and depth <= kind.len and kind[depth - 1]) await_key[depth - 1] = true;
             },
             ']' => {
                 if (depth > 0) depth -= 1;
                 i += 1;
-                if (depth > 0 and kind[depth - 1]) await_key[depth - 1] = true;
+                if (depth > 0 and depth <= kind.len and kind[depth - 1]) await_key[depth - 1] = true;
             },
             ',' => {
-                if (depth > 0 and kind[depth - 1]) await_key[depth - 1] = true;
+                if (depth > 0 and depth <= kind.len and kind[depth - 1]) await_key[depth - 1] = true;
                 i += 1;
             },
             ':' => i += 1,
@@ -201,7 +201,7 @@ pub fn findValue(json: []const u8, key: []const u8) ?FoundValue {
                 }
                 const inner_end = @min(end, json.len);
                 const after = if (end < json.len) end + 1 else json.len;
-                const in_obj = depth > 0 and kind[depth - 1];
+                const in_obj = depth > 0 and depth <= kind.len and kind[depth - 1];
                 if (in_obj and await_key[depth - 1]) {
                     if (std.mem.eql(u8, json[inner_start..inner_end], key)) {
                         var j = after;
@@ -219,7 +219,7 @@ pub fn findValue(json: []const u8, key: []const u8) ?FoundValue {
             else => {
                 // A scalar literal (number / true / false / null) or a stray byte.
                 i = skipScalar(json, i);
-                if (depth > 0 and kind[depth - 1]) await_key[depth - 1] = true;
+                if (depth > 0 and depth <= kind.len and kind[depth - 1]) await_key[depth - 1] = true;
             },
         }
     }
@@ -293,6 +293,12 @@ fn skipScalar(json: []const u8, start: usize) usize {
             else => break,
         }
     }
+    // A byte that begins no valid scalar consumes nothing, leaving the caller's
+    // cursor exactly where it was. `findValue`'s else-branch does
+    // `i = skipScalar(json, i)`, so returning `start` here makes it spin forever
+    // on any malformed input — e.g. findValue("not json", "type") never returns.
+    // Always make progress; a malformed document becomes "key not found".
+    if (i == start) return start + 1;
     return i;
 }
 
@@ -968,4 +974,93 @@ test "writer round-trips through the tokenizer" {
     const count = try tokenize(produced, &tokens);
     try std.testing.expectEqual(@as(usize, 9), count);
     try std.testing.expectEqualStrings("Alice", findKey(produced, "name").?);
+}
+
+test "findValue terminates on malformed input" {
+    // Regression: skipScalar returned its `start` index unchanged for any byte
+    // that begins no valid JSON scalar, so findValue's else-branch re-examined
+    // the same byte forever. findValue("not json", "type") never returned.
+    //
+    // This mattered well beyond a hung parse: consumers call these helpers on
+    // untrusted HTTP request bodies, so a single malformed body pinned a thread
+    // at 100% CPU permanently.
+    // The property under test is TERMINATION. Reaching the assertion at all is
+    // the pass condition; before the fix these calls never returned.
+    //
+    // Documents where the key genuinely is not present must report that.
+    try std.testing.expect(findValue("not json", "type") == null);
+    try std.testing.expect(findValue("garbage", "k") == null);
+    try std.testing.expect(findValue("x", "k") == null);
+    try std.testing.expect(findValue("@@@", "k") == null);
+    try std.testing.expect(findValue("[x]", "k") == null);
+    try std.testing.expect(findValue("{\"messages\":[x]}", "k") == null);
+    try std.testing.expect(findValue("}{", "k") == null);
+    try std.testing.expect(findValue(":::", "k") == null);
+    try std.testing.expect(findValue(",,,", "k") == null);
+    try std.testing.expect(findValue("\"unterminated", "k") == null);
+    try std.testing.expect(findValue("", "k") == null);
+
+    // Documents where the key IS present but its value is junk: these return
+    // something rather than null, because the key was found and `readValue`
+    // hands back the raw span it saw. That is pre-existing behavior and is NOT
+    // what this fix changes — `findValue` locates values, it does not validate
+    // them. Callers that need validity should check `kind` and parse the text
+    // (extractInt/extractFloat already do). Asserted explicitly so the loose
+    // behavior is recorded rather than assumed.
+    const junk_scalar = findValue("{\"k\": @}", "k");
+    try std.testing.expect(junk_scalar != null);
+    try std.testing.expectEqualStrings("@", junk_scalar.?.text);
+
+    const junk_word = findValue("{\"k\": yes}", "k");
+    try std.testing.expect(junk_word != null);
+
+    // An unterminated string value yields the rest of the input, not a hang.
+    const unterminated = findValue("{\"k\": \"unterminated", "k");
+    try std.testing.expect(unterminated != null);
+    try std.testing.expect(unterminated.?.kind == .string);
+}
+
+test "findKey terminates on malformed input" {
+    try std.testing.expect(findKey("not json", "type") == null);
+    try std.testing.expect(findKey("@@@", "k") == null);
+}
+
+test "findValue does not read out of bounds when nesting exceeds the frame array" {
+    // `depth` was incremented without bound but then used to index a fixed
+    // 128-entry frame array, so deeply nested input read past the end of `kind`
+    // / `await_key` — a panic in Debug and UB in ReleaseFast, reachable with a
+    // body of nothing but brackets.
+    var arr: [1024]u8 = undefined;
+    @memset(arr[0..512], '[');
+    @memset(arr[512..], ']');
+    try std.testing.expect(findValue(&arr, "k") == null);
+
+    var obj: [600]u8 = undefined;
+    @memset(obj[0..300], '{');
+    @memset(obj[300..], '}');
+    try std.testing.expect(findValue(&obj, "k") == null);
+
+    // Deeper than the frame array, but with a real key at the top level: the
+    // shallow frames must still be intact on the way back down.
+    var mixed: [512]u8 = undefined;
+    @memset(&mixed, '[');
+    try std.testing.expect(findValue(&mixed, "k") == null);
+}
+
+test "findValue still resolves valid documents after the termination fix" {
+    const body = "{\"model\":\"gpt-4\",\"max_tokens\":128,\"stream\":true,\"stop\":null,\"t\":0.7}";
+    try std.testing.expectEqualStrings("gpt-4", findValue(body, "model").?.text);
+    try std.testing.expect(findValue(body, "max_tokens").?.kind == .number);
+    try std.testing.expectEqualStrings("128", findValue(body, "max_tokens").?.text);
+    try std.testing.expect(findValue(body, "stream").?.kind == .boolean);
+    try std.testing.expect(findValue(body, "stop").?.kind == .null_);
+    try std.testing.expect(findValue(body, "absent") == null);
+
+    // A string VALUE equal to a key name is still not mistaken for the key.
+    try std.testing.expectEqualStrings("real", findValue("{\"a\":\"model\",\"model\":\"real\"}", "model").?.text);
+
+    // Object and array values still come back as balanced spans.
+    const nested = "{\"outer\":{\"inner\":1},\"list\":[1,2,3]}";
+    try std.testing.expectEqualStrings("{\"inner\":1}", findValue(nested, "outer").?.text);
+    try std.testing.expectEqualStrings("[1,2,3]", findValue(nested, "list").?.text);
 }
